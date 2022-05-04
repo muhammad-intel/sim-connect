@@ -1,0 +1,20 @@
+#!/bin/tcsh
+
+setenv VCS_HOME   /p/hdk/rtl/cad/x86-64_linux26/synopsys/vcsmx/P-2019.06-SP2-9
+setenv VERDI_HOME /p/hdk/rtl/cad/x86-64_linux26/synopsys/verdi3/P-2019.06-SP2-9
+set path = ($VCS_HOME/linux64/bin $path)
+set path = ($VERDI_HOME/bin $path)
+
+# For vcsmx
+unsetenv SNPSLMD_LICENSE_FILE
+setenv SNPSLMD_LICENSE_FILE 26586@synopsys05p.elic.intel.com:26586@synopsys08p.elic.intel.com:26586@synopsys16p.elic.intel.com
+
+# For verdi3
+unsetenv NOVAS_LICENSE_FILE
+setenv SNPSLMD_LICENSE_FILE 26586@synopsys40p.elic.intel.com:$SNPSLMD_LICENSE_FILE
+set MODEL_ROOT = /nfs/site/disks/xpg.sprmccfe.0019/rahman3x/new_relay/cxl_relay_new
+setenv LD_LIBRARY_PATH :${MODEL_ROOT}/verif/tb/env/cxl_relay
+setenv CXL_RELAY_SERVER_PATH ${MODEL_ROOT}/verif/tb/env/cxl_relay
+setenv CXL_RELAY_SERVER_IP "127.0.0.1"
+
+

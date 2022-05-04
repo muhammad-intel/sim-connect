@@ -1,0 +1,371 @@
+// forward-pcie-main.dml - Skeleton code to base new DML device modules on
+
+dml 1.4;
+
+device forward_pcie_main;
+
+param desc = "PCIe config device";
+
+param documentation = "Device to intercept memory operations";
+
+import "utility.dml";
+import "simics/devs/memory-space.dml";
+import "pci/common.dml";
+
+is pcie_device;
+// Leaving hotplug to true means we can create the object without 
+// attaching to a pci_bus, which is handy for unit testing
+param pci_hotplug = true;
+
+// Custom log group to use for misc PCIe stuff
+loggroup PCIe;
+
+//----------------------------------------------------------------------
+//
+// Attributes listing the objects to map
+// Declared using connect to get interface type checks for free
+//
+// Only 5 declared, to show how BAR5 is not used
+//
+//----------------------------------------------------------------------
+connect pci_config_forward is map_target {
+    param desc = "Object to forward opearations from PCI config bank";
+    param configuration = "required";
+}
+
+connect bar0_object is map_target {
+    param desc = "Object to map in BAR0";
+    param configuration = "required";
+}
+
+connect bar1_object is map_target {
+    param desc = "Object to map in BAR1";
+    param configuration = "required";
+}
+
+connect bar2_object is map_target {
+    param desc = "Object to map in BAR2";
+    param configuration = "required";
+}
+
+connect bar3_object is map_target {
+    param desc = "Object to map in BAR3";
+    param configuration = "required";
+}
+
+connect bar4_object is map_target {
+    param desc = "Object to map in BAR4";
+    param configuration = "required";
+}
+
+attribute use_rtl is bool_attr {
+    param description = "working with cosim environment";
+    param configuration = "optional";
+}
+
+
+//----------------------------------------------------------------------
+//
+// PCIe Interface, to support PCIe hotplug messages. 
+// - The presence of this interface is used by Simics to determine if
+//   the device is a PCIe device or a plain PCI device
+// - Not used in the training, but needed to satisfy interface requirements
+// - Simple implementation, stripped down to "unimpl"
+//
+//----------------------------------------------------------------------
+implement pci_express {
+    method send_message(conf_object_t *src, pcie_message_type_t type,
+                        byte_string_t payload) -> (int) {
+        local int h;
+        // Just log unimplemented, no point in wasting code on 
+        // implementing something that is not used                   
+        log unimpl, 2, PCIe: "PCI Express message: %d", type;
+        h = 0;
+        return h;
+    }
+}
+
+//----------------------------------------------------------------------
+//
+// PCIe configuration bank 
+//
+//----------------------------------------------------------------------
+bank pci_config is (pci_config_type_0,
+                    defining_pcie_capability_root_ports_v3
+) {
+    param desc = "PCIe configuration register bank";
+
+    // Override accesses - using transaction interface
+    // But right now old-style PCI config does not support transactions
+    // ...so we have to use io_memory_override
+    //   Direct all accesses to the transaction interface:
+    //    param use_io_memory=false;
+    //   And then accesses will end up here:
+    //method transaction_access(transaction_t *t, uint64 offset, void *aux) -> (exception_type_t) {
+    //    local exception_type_t e;
+    //    e= default(t,offset,aux);
+    //    log info, 2, PCIe : "Captured incoming memory operation in transaction_access";
+    //    return e;
+    //}
+
+    method io_memory_access(generic_transaction_t *memop, uint64 offset, void *aux) -> (bool) {
+        local bool result;
+        result = default(memop,offset,aux); // result will be always true!!
+
+        // Perform the same operation to the next-level object
+        // Requires creating and setting up a transaction object
+        local int opsize = SIM_get_mem_op_size(memop);
+        local uint8 buf[8] ;  // Buf to hold the information - always 8 bytes or smaller
+        // for operations that hit here
+
+        if(SIM_mem_op_is_read(memop)) {
+            log info, 3, PCIe : "Forwarding memory operation: read from 0x%x size %d", offset, opsize;
+
+            local uint64 fwd_val;
+            local uint64 bank_val = SIM_get_mem_op_value_le(memop);
+
+            try {
+                fwd_val = pci_config_forward.read(offset,opsize);
+            } catch {
+                log error, PCIe : "Failed to pass on read from pci_config!";    
+                // Bail out of this function, nothing more to do
+                return result;
+            }
+			
+            if (use_rtl.val == true) {
+                SIM_set_mem_op_value_le(memop,fwd_val);
+                log info, 2, PCIe : "Using forwarded read result: read from 0x%x -> 0x%x (instead of 0x%x)", 
+                offset,fwd_val,bank_val;
+            } else {
+                log info, 2, PCIe : "DML bank provided read result: read from 0x%x -> 0x%x", offset,bank_val;
+            }
+
+            // Use read value from remote, if we missed the bank
+            // THIS LOGIC IS CURRENTLY BROKEN - no way to tell if we hit bank 
+            // registers or not! 
+            // if(result==true) {
+            //     // The DML bank provided a value
+            //     log info, 2, PCIe : "DML bank provided read result: read from 0x%x -> 0x%x", offset,bank_val;
+            // } else {
+            //     // Insert value from the forwarded operation 
+            //     SIM_set_mem_op_value_le(memop,fwd_val);
+            //     log info, 2, PCIe : "Using forwarded read result: read from 0x%x -> 0x%x (instead of 0x%x)", 
+            //     offset,fwd_val,bank_val;
+            //     // And signal upwards that we produced a value that hit ... something
+            //     result = true;
+            // }
+        } else if (SIM_mem_op_is_write(memop)) {
+            // All writes can be passed on 
+            local uint64 val;
+            val = SIM_get_mem_op_value_le(memop);
+            log info, 3, PCIe : "Forwarding memory operation: write to 0x%x size %d value=0x%x", 
+            offset, opsize, val;
+
+            try {
+                pci_config_forward.write(offset,opsize,val);
+            } catch {
+                log error, PCIe : "Failed to pass on write from pci_config!";    
+                // Bail out of this function, nothing more to do
+                return result;
+            }
+
+        } else {
+            log info, 2, PCIe : "Memory operation neither read nor write, bizarre. Not passing on.";
+        }
+        return result;
+    }
+
+    //method unmapped_read(uint64 offset, uint64 value, uint64 bits, void *aux) throws {
+    //    log info, 3, PCIe : "Call to unmapped_read(), offset=0x%x value=0x%x", offset, value;
+    //}
+
+
+    // Our Vendor, Device ID, and other identification information
+    register vendor_id   { param init_val =   0x8086; }  // Intel
+    register device_id   { param init_val =   0x0D5F; }  // PCIe ID assigned to Simics 
+    register revision_id { param init_val =     0x02; }  // Revision number
+    register class_code  { param init_val = 0x120000; }  // "Processing accelerator"
+    
+    register status {
+        field c { param init_val = 1; }  // mark that we have capabilities
+    }
+    // Base Address Registers (BARs)
+    // This parameter has to list all BARs for them to be found by the system
+    //
+    // Could likely be cut down if you have fewer BARs active
+    param base_address_registers = ["base_address_0",
+                                    "base_address_1",
+                                    "base_address_2",
+                                    "base_address_3",
+                                    "base_address_4"
+                                    // "base_address_5" Not used
+    ];
+                                    
+    //--------------------------------------------------------------------------
+    // The BARs, have to list the unused one as well and mark them as unused
+    // 
+    // 64-bit BARs require a different configuration
+    //
+    // Each mapping is a separate size to make them easier to spot in the memory map
+    //--------------------------------------------------------------------------
+    
+    //
+    // BAR #0:
+    //          
+    register base_address_0 @ 0x10 is (memory_base_address_32) {
+        param size_bits = 12;   // size of mapping -- 12 bits = 4kB for regs 
+        param map_func  = 0;   // mapped-in objects should use function 0
+        
+        method pci_mapping_object() -> (conf_object_t *) {
+            log info, 2, PCIe : "Mapping BAR0 to %s", SIM_object_name(bar0_object.obj);
+            return bar0_object.obj;
+        }
+
+        // This makes the BAR mapping use an offset==base, leading to the mapped object
+        // seeing accesses where the incoming memory operation address is the same as 
+        // address where the object is mapped.  Normally, the mapped objects get a
+        // zero-based local offset.  Setting "start" to non-zero changes that.
+        method pci_mapping_customize(map_info_t *m) {
+            log info, 2, PCIe : "BAR0 mapping customize called!";
+            m->start = m->base;
+        }
+		
+    }
+
+    //      
+    // BAR #1: 
+    //
+    register base_address_1 @ 0x14 is (memory_base_address_32) {
+        param size_bits = 14;   
+        param map_func  = 0;   // mapped-in objects should use function 0
+        
+        method pci_mapping_object() -> (conf_object_t *) {
+            log info, 2, PCIe : "Mapping BAR1 to %s", SIM_object_name(bar1_object.obj);
+            return bar1_object.obj;
+        }
+
+        // This makes the BAR mapping use an offset==base, leading to the mapped object
+        // seeing accesses where the incoming memory operation address is the same as 
+        // address where the object is mapped.  Normally, the mapped objects get a
+        // zero-based local offset.  Setting "start" to non-zero changes that.
+        method pci_mapping_customize(map_info_t *m) {
+            log info, 2, PCIe : "BAR1 mapping customize called!";
+            m->start = m->base;
+        }
+		
+    }
+    
+    //
+    // BAR #2: 
+    // 
+    register base_address_2 @ 0x18 is (memory_base_address_32) {
+        param size_bits = 16;   
+        param map_func  = 0;   // mapped-in objects should use function 0
+        
+        method pci_mapping_object() -> (conf_object_t *) {
+            log info, 2, PCIe : "Mapping BAR2 to %s", SIM_object_name(bar2_object.obj);
+            return bar2_object.obj;
+        }
+
+        // This makes the BAR mapping use an offset==base, leading to the mapped object
+        // seeing accesses where the incoming memory operation address is the same as 
+        // address where the object is mapped.  Normally, the mapped objects get a
+        // zero-based local offset.  Setting "start" to non-zero changes that.
+        method pci_mapping_customize(map_info_t *m) {
+            log info, 2, PCIe : "BAR2 mapping customize called!";
+            m->start = m->base;
+        }
+		
+    }
+
+    //
+    // BAR #3: 
+    //
+    register base_address_3 @ 0x1C is (memory_base_address_32) {
+        param size_bits = 18;   
+        param map_func  = 0;   // mapped-in objects should use function 0
+        
+        method pci_mapping_object() -> (conf_object_t *) {
+            log info, 2, PCIe : "Mapping BAR3 to %s", SIM_object_name(bar3_object.obj);
+            return bar3_object.obj;
+        }
+
+        // This makes the BAR mapping use an offset==base, leading to the mapped object
+        // seeing accesses where the incoming memory operation address is the same as 
+        // address where the object is mapped.  Normally, the mapped objects get a
+        // zero-based local offset.  Setting "start" to non-zero changes that.
+        method pci_mapping_customize(map_info_t *m) {
+            log info, 2, PCIe : "BAR3 mapping customize called!";
+            m->start = m->base;
+        }
+		
+    }
+    
+    //
+    // BAR #4: 
+    //
+    register base_address_4 @ 0x20 is (memory_base_address_32) {
+        param size_bits = 20;   
+        param map_func  = 0;   // mapped-in objects should use function 0
+        
+        method pci_mapping_object() -> (conf_object_t *) {
+            log info, 2, PCIe : "Mapping BAR4 to %s", SIM_object_name(bar4_object.obj);
+            return bar4_object.obj;
+        }
+
+        // This makes the BAR mapping use an offset==base, leading to the mapped object
+        // seeing accesses where the incoming memory operation address is the same as 
+        // address where the object is mapped.  Normally, the mapped objects get a
+        // zero-based local offset.  Setting "start" to non-zero changes that.
+        method pci_mapping_customize(map_info_t *m) {
+            log info, 2, PCIe : "BAR4 mapping customize called!";
+            m->start = m->base;
+        }
+		
+    }
+
+    //
+    // BAR #5: Empty, nothing mapped
+    //
+    register base_address_5 @ 0x24 is (no_base_address_32) ;
+
+    // The rest     
+    // PCI and PCIe Capabilities - follows the main configuration registers in the pci configuration space
+    register capabilities_ptr { param init_val = exp_offset; }
+
+    // PCIe capability;
+    param exp_offset = 0x80;
+    param exp_next_ptr = 0x0;  // end of list
+    
+    // A regular PCIe endpoint device has to define:
+    //  exp_capababilities (PCIe capabilities)
+    //  exp_dev_cap        (Device capabilities)
+    //  exp_dev_status     (Device status, which we ignore)
+    //  exp_dev_control    (Device control, which we ignore)
+    //
+    //  exp_link_cap       (link registers set 1 needed for all 
+    //  exp_link_status     devices that are not root complex 
+    //  exp_link_control    integrated devices)
+    //
+    //  This device does not implement anything needing capabilities_2 regs
+    //   
+    register exp_capabilities {
+        field dpt { param init_val = 0x0; } // device port type endpoint
+    }                
+    register exp_dev_cap {
+        field el0al { param init_val = 0x01; } // 128 ns 
+        field el1al { param init_val = 0x01; } // 2 us 
+        field rber  { param init_val = 0x1; }  // must be 1 for PCIe, basically
+    }
+    
+    register exp_link_cap {
+        field mls    { param init_val = 0x0; }  // Link Speed
+        field mlw    { param init_val = 0x4; }  // Max Link Width
+    }
+    register exp_link_status {
+        field ls  { param init_val = 0x1; }
+        field nlw { param init_val = 0x4; }  // Link width, should be != 0
+    }
+}
+
+
